@@ -6,207 +6,47 @@
 //!
 //! If you're wanting to do config file parsing, please choose a more full featured parser and use an
 //! established format like JSON, TOML, or YAML.
+//!
+//! # Design Concerns
+//!
+//! This parser will allocate and duplicate a lot of data that is contained in the original string slice
+//! that was provided to it.  An optimization for a more zero-copy approach is to store string slices
+//! in the provided map, rather than allocating new strings.
+//!
+//! This optimization would require the map to be constrained to the lifetime of the original string slice.
+//! There is a special case of string values where when the value is quoted with escape character that we have
+//! to allocate a new string.  This is because we have to unescape the string, and we can't do that in place.
+//!
+//! To handle this, we need a special string enumeration that could container either a string reference or an
+//! owned string.
+//!
+//! # Example
+//!
+//! For this sort of string:
+//! ```pre
+//! one=aaaaaaaaaaaa two=bbbbbbbbbbbbbbbb three=ccccccccccc four=dddddddddd
+//! ```
+//! We could store 8 string slices.  Four of those slices would point to the keys (one, two, three, four),
+//! and the other four would point to the values (aaaaaaaaaaaa, bbbbbbbbbbbbbbbb, ccccccccccc, ddddddddd).
+//!
+//! A slice, is conceptually a pointer to the start of the string, and a length.  Maybe more verbose (but not)
+//! implementation accurate, would be that it stores the original string, a index to the start of the slice,
+//! and a length.
+//!
+//! ```pre
+//! struct two {
+//!   string: something_pointer,
+//!   start: 17,
+//!   len: 16
+//! }
+//! ```
+//!
+//! Ideally, we'd like to have HashMap<&str,&str> where the only allocation of memory is the HashMap itself and the
+//! internal data structures it uses to store data.  But our original string contains the "data", so a string length
+//! of 100gb would be stored in the hashmap in just a few bytes of data.  This is the zero-copy approach.
 
-use anyhow::Result;
-use nom::{
-    bytes::complete::{tag, take, take_while},
-    character::complete::multispace0,
-    IResult,
-};
-use std::collections::HashMap;
-
-pub struct Parser {
-    pub map: HashMap<String, String>,
-}
-impl Parser {
-    /// Construct a new parser.  
-    /// If the parser cannot parse the input, an error will be returned.
-    /// ```
-    /// use key_value_parser::Parser;
-    /// const DATA: &str = "  key = value   ";
-    /// let parser = Parser::new(DATA).unwrap();
-    /// assert_eq!(parser.len(), 1);
-    /// assert_eq!(parser.get("key").unwrap(), "value");
-    /// ```
-    pub fn new(input: &str) -> Result<Self> {
-        // use nom to parse data
-        let mut map = HashMap::new();
-
-        let mut head = input.trim_start();
-        while !head.is_empty() {
-            let (input, (key, value)) = parse_one_key_value(head)
-                .map_err(|e| anyhow::anyhow!("Could not parse input data: {:?}", e))?;
-
-            map.insert(key, value);
-
-            head = input;
-        }
-
-        Ok(Self { map })
-    }
-
-    /// Gets a value from the container.  Same signature as HashMap::get
-    pub fn get(&self, key: &str) -> Option<&String> {
-        self.map.get(key)
-    }
-
-    /// Returns how many key value pairs are available
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    /// Returns true if there are no key value pairs
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-}
-
-fn parse_one_key_value(input: &str) -> IResult<&str, (String, String)> {
-    // eat whitespace
-    let (input, _) = multispace0(input)?;
-    let (input, key) = take_while(|c: char| c.is_alphanumeric() || c == '-' || c == '_')(input)?;
-    // eat whitespace
-    let (input, _) = multispace0(input)?;
-    let (input, _) = tag("=")(input)?;
-    // eat whitespace
-    let (input, _) = multispace0(input)?;
-    let (input, value) = parse_value(input)?;
-    // eat whitespace
-    let (input, _) = multispace0(input)?;
-
-    Ok((input, (key.to_string(), value)))
-}
-
-fn unquoted_value(input: &str) -> IResult<&str, String> {
-    let (input, value) = take_while(|c: char| !c.is_whitespace())(input)?;
-    Ok((input, value.to_string()))
-}
-
-fn quoted_value(input: &str) -> IResult<&str, String> {
-    let (input, _) = tag("\"")(input)?;
-
-    // aaaaaaaaaaaa\"bbbbbbbbbbbbbbbb\"ccccccccccc\"dddddddddd
-    let mut accum = String::new();
-
-    let mut head = input;
-    loop {
-        // consume until we hit a backslash or a quote
-        let (input, so_far) = take_while(|c: char| c != '\\' && c != '"')(head)?;
-
-        accum.push_str(so_far);
-
-        // let's see what we hit
-        let (data, backslash_or_quote) = take(1usize)(input)?;
-
-        match backslash_or_quote {
-            "\"" => {
-                // we hit a quote
-                // so we're done
-                head = data;
-                break;
-            }
-            _ => {
-                // we hit a backslash
-                // so we need to see what's next
-                let (data, next_char) = take(1usize)(data)?;
-                // append that as a literal value
-                accum.push_str(next_char);
-
-                // move the head forward
-                head = data;
-            }
-        }
-    }
-
-    Ok((head, accum))
-}
-
-fn parse_value(input: &str) -> IResult<&str, String> {
-    let (_, peek_next_char) = take(1usize)(input)?;
-
-    match peek_next_char {
-        "\"" => quoted_value(input),
-        _ => unquoted_value(input),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Result;
-
-    #[test]
-    fn test_happy_path() -> Result<()> {
-        const DATA: &str = "  key = value   ";
-        let parser = Parser::new(DATA)?;
-
-        assert_eq!(parser.len(), 1);
-
-        let value = parser.get("key").unwrap();
-        assert_eq!(value, "value");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_happy_path_multiple_values() -> Result<()> {
-        const DATA: &str = "  key = value  key2=value2 ";
-        let parser = Parser::new(DATA)?;
-
-        assert_eq!(parser.len(), 2);
-
-        let value = parser.get("key").unwrap();
-        assert_eq!(value, "value");
-
-        let value = parser.get("key2").unwrap();
-        assert_eq!(value, "value2");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_handles_quotes() -> Result<()> {
-        const DATA: &str = "  key = \"value\"  key2=\"value2 with spaces\" ";
-        let parser = Parser::new(DATA)?;
-
-        assert_eq!(parser.len(), 2);
-
-        let value = parser.get("key").unwrap();
-        assert_eq!(value, "value");
-
-        let value = parser.get("key2").unwrap();
-        assert_eq!(value, "value2 with spaces");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_quoted_with_escape_characters() {
-        const DATA: &str = "key=\"value with \\\"escaped\\\" quotes\"";
-
-        let parser = Parser::new(DATA).unwrap();
-
-        assert_eq!(parser.len(), 1);
-
-        let value = parser.get("key").unwrap();
-        assert_eq!(value, "value with \"escaped\" quotes");
-    }
-
-    #[test]
-    fn test_no_data() {
-        const DATA: &str = "   ";
-
-        let parser = Parser::new(DATA).unwrap();
-
-        assert_eq!(parser.len(), 0);
-    }
-
-    #[test]
-    fn test_bad_parsing() {
-        const BAD_DATA: &[&str] = &[" foo ", "bar", ";foo=bar", "quoted=\"foo"];
-        for data in BAD_DATA {
-            let parser = Parser::new(data);
-            assert!(parser.is_err(), "Should have failed to parse: {:?}", data);
-        }
-    }
-}
+pub mod almost_zero_copy;
+pub mod full_almost_zero_copy;
+pub mod full_copy;
+pub mod zero_copy;
+pub mod zero_parse;
