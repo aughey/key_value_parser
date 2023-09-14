@@ -1,4 +1,11 @@
-use std::collections::HashMap;
+//! This crate provides a simple key value parser.
+//!
+//! # Details
+//!
+//! This parser is designed to be simple and fast. It is not designed to be a full featured parser.
+//!
+//! If you're wanting to do config file parsing, please choose a more full featured parser and use an
+//! established format like JSON, TOML, or YAML.
 
 use anyhow::Result;
 use nom::{
@@ -6,16 +13,26 @@ use nom::{
     character::complete::multispace0,
     IResult,
 };
+use std::collections::HashMap;
 
 pub struct Parser {
     pub map: HashMap<String, String>,
 }
 impl Parser {
+    /// Construct a new parser.  
+    /// If the parser cannot parse the input, an error will be returned.
+    /// ```
+    /// use key_value_parser::Parser;
+    /// const DATA: &str = "  key = value   ";
+    /// let parser = Parser::new(DATA).unwrap();
+    /// assert_eq!(parser.len(), 1);
+    /// assert_eq!(parser.get("key").unwrap(), "value");
+    /// ```
     pub fn new(input: &str) -> Result<Self> {
         // use nom to parse data
         let mut map = HashMap::new();
 
-        let mut head = input;
+        let mut head = input.trim_start();
         while !head.is_empty() {
             let (input, (key, value)) = parse_one_key_value(head)
                 .map_err(|e| anyhow::anyhow!("Could not parse input data: {:?}", e))?;
@@ -27,12 +44,18 @@ impl Parser {
 
         Ok(Self { map })
     }
+
+    /// Gets a value from the container.  Same signature as HashMap::get
     pub fn get(&self, key: &str) -> Option<&String> {
         self.map.get(key)
     }
+
+    /// Returns how many key value pairs are available
     pub fn len(&self) -> usize {
         self.map.len()
     }
+
+    /// Returns true if there are no key value pairs
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
@@ -167,5 +190,23 @@ mod tests {
 
         let value = parser.get("key").unwrap();
         assert_eq!(value, "value with \"escaped\" quotes");
+    }
+
+    #[test]
+    fn test_no_data() {
+        const DATA: &str = "   ";
+
+        let parser = Parser::new(DATA).unwrap();
+
+        assert_eq!(parser.len(), 0);
+    }
+
+    #[test]
+    fn test_bad_parsing() {
+        const BAD_DATA: &[&str] = &[" foo ", "bar", ";foo=bar", "quoted=\"foo"];
+        for data in BAD_DATA {
+            let parser = Parser::new(data);
+            assert!(parser.is_err(), "Should have failed to parse: {:?}", data);
+        }
     }
 }
